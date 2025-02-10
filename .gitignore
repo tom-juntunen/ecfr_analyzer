@@ -1,0 +1,5 @@
+*.jsonl
+models/*
+__pycache__
+venv
+*.db

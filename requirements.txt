@@ -1,0 +1,9 @@
+fastapi
+streamlit
+pandas
+uvicorn
+huggingface_hub[cli]
+httpx
+nest_asyncio
+duckdb
+xmltodict
