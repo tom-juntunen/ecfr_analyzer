@@ -17,7 +17,8 @@ st.set_page_config(
 
 nest_asyncio.apply()
 
-API_URL = "http://localhost:8000/api"
+# API_URL = "http://localhost:8000/api"
+API_URL = "https://ecfr-analyzer-api-a84b944f87af.herokuapp.com/api"
 APPROVED_MODELS = ["gpt2", "bert-base-uncased"]
 TABLE_PAGE_SIZE = 50
 
@@ -133,6 +134,7 @@ def cached_get_agencies():
 
 @st.cache_data
 def cached_get_kpis(q: str, agencies: List[str]):
+    if not q: return []
     resp = asyncio.run(get_kpi_data(q, agencies))
     if resp and resp.status_code == 200:
         return resp.json()
@@ -140,6 +142,7 @@ def cached_get_kpis(q: str, agencies: List[str]):
 
 @st.cache_data
 def cached_get_chart(q: str, agencies: List[str]):
+    if not q: return {}
     resp = asyncio.run(get_chart_data(q, agencies))
     if resp and resp.status_code == 200:
         return resp.json()
@@ -147,6 +150,7 @@ def cached_get_chart(q: str, agencies: List[str]):
 
 @st.cache_data
 def cached_get_table(q: str, skip: int, limit: int, agencies: List[str]):
+    if not q: return {}
     resp = asyncio.run(get_table_data(q, skip, limit, agencies))
     if resp and resp.status_code == 200:
         return resp.json()
@@ -195,6 +199,7 @@ def on_search_submit():
 
 # Layout
 st.title("eCFR Analyzer")
+st.text("Use this tool to search for documents within the US Code of Federal Regulations by keyword.")
 
 col1, col2 = st.columns([3,1])
 
@@ -264,6 +269,7 @@ else:
 
 # Table
 st.subheader("Results Table")
+st.text("View rows in this table by selecting the checkbox in the first column. The keyword matched in the search query will be highlighted in yellow.")
 page_num = st.session_state["table_page"]
 skip = (page_num - 1) * TABLE_PAGE_SIZE
 table_resp = cached_get_table(st.session_state["search"], skip, TABLE_PAGE_SIZE, selected_agencies)
@@ -284,7 +290,7 @@ if table_resp:
         event = st.dataframe(
             df_disp,
             use_container_width=True,
-            hide_index=True,
+            hide_index=False,
             selection_mode="single-row",
             on_select="rerun",
             key="table_sel"
