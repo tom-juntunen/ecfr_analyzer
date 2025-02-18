@@ -34,8 +34,15 @@ class LoggingConnection:
         return getattr(self._connection, name)
 
 # Connect to DuckDB
-raw_con = duckdb.connect(database='duck.db', read_only=True)
+# Set MotherDuck Access Token
+# os.environ["MOTHERDUCK_TOKEN"] 
+
+# Connect to MotherDuck database
+raw_con = duckdb.connect(database="md:ecfr_analyzer", read_only=True)
 con = LoggingConnection(raw_con)
+
+# Verify connection
+print(con.execute("SELECT 'Connected to MotherDuck!'").fetchone())
 
 app = FastAPI(title="eCFR Analyzer")
 
