@@ -229,12 +229,12 @@ if kpi_data:
         lab = met["metric"]
         if lab in ["Section Count", "Word Count"]:
             ccols[i].metric(lab, f"{int(val):,}")
-        elif lab == "Change Rate":
-            ccols[i].metric(lab, f"{val:.1f}%")
-        elif lab == "Alignment Score":
-            ccols[i].metric(lab, f"{val:.1f}")
-        else:
-            ccols[i].metric(lab, str(val))
+        # elif lab == "Change Rate":
+        #     ccols[i].metric(lab, f"{val:.1f}%")
+        # elif lab == "Alignment Score":
+        #     ccols[i].metric(lab, f"{val:.1f}")
+        # else:
+        #     ccols[i].metric(lab, str(val))
 else:
     st.write("No KPI data returned.")
 
