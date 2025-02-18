@@ -82,15 +82,25 @@ def test_query_data_flatten_list():
 
     print(json.dumps(all_data, indent=2))
 
+def test_query_custom():
+
+    query = """
+    SELECT 
+        title
+    FROM base__agency_section
+"""
+    res = con.execute(query).fetchone()
+    print(json.dumps(res, indent=2))
 
 def main():
     if not test_tables_exist():
         print("Test failed: Not all tables exist.")
         return
 
-    test_query_data()
+    # test_query_data()
     # test_query_data_simple()
-    test_query_data_get_first_row()
+    # test_query_data_get_first_row()
+    test_query_custom()
     print("Tests completed.")
 
 if __name__ == "__main__":

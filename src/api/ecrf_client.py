@@ -30,32 +30,20 @@ CONCURRENCY_LIMIT = 6  # maximum concurrent requests
 # Date Range Helper
 def generate_date_range(start_date, end_date):
     """
-    Generates a list of dates representing the last day of each month that overlaps
-    with the given date range. If the start_date or end_date do not fall on the actual
-    last day of the month, the function will "fill in" with the actual month end.
+    Generates a list of date strings for every day between the start_date and end_date (inclusive).
     
     Args:
-        start_date and end_date: strings in "YYYY-MM-DD" format.
+        start_date (str): Start date in "YYYY-MM-DD" format.
+        end_date (str): End date in "YYYY-MM-DD" format.
         
     Returns:
-        A list of date strings representing the last day of each month.
+        List[str]: A list of date strings for each day in the range.
     """
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    result = []
-    current_year = start.year
-    current_month = start.month
-    # Loop over each month between start and end (inclusive of the month, even if partially covered)
-    while (current_year, current_month) <= (end.year, end.month):
-        last_day = calendar.monthrange(current_year, current_month)[1]
-        last_date = datetime(current_year, current_month, last_day).date()
-        result.append(last_date.strftime("%Y-%m-%d"))
-        if current_month == 12:
-            current_month = 1
-            current_year += 1
-        else:
-            current_month += 1
-    return result
+    delta_days = (end - start).days + 1
+    
+    return [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta_days)]
 
 
 # HTTP and XML Helpers
@@ -336,6 +324,8 @@ async def process_endpoint(endpoint, start_date=None, end_date=None, semaphore=N
                 tasks.append(asyncio.create_task(process_section_request(url, params, semaphore, client)))
             else:
                 tasks.append(asyncio.create_task(process_request(url, params, endpoint.get("data_key"), semaphore, client)))
+
+            break  # use only the first date for now; TODO: setup historical pipeline for change history and use this there
         
         # Await the batch of tasks for the current title.
         responses = await asyncio.gather(*tasks)
@@ -391,8 +381,8 @@ async def main():
     ]
 
     # Set desired date range.
-    start_date = "2025-01-07"
-    end_date = "2025-01-07"
+    start_date = "2025-01-06"
+    end_date = "2025-01-13"
 
     async with httpx.AsyncClient() as client:
         for endpoint in endpoints:

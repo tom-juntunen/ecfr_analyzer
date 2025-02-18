@@ -35,6 +35,9 @@ REQUIRED_PATTERNS = {
 
     # Special tokens mapping – used for models like LLaMA and sometimes others.
     "special_tokens": r"^special_tokens_map\.json$",
+
+    # Vocab file:
+    "vocab": r"^vocab\.json$",
 }
 
 def download_model_files(repo_id: str, revision: str = None):
@@ -69,6 +72,8 @@ def download_model_files(repo_id: str, revision: str = None):
             continue
         if key == "special_tokens" and not files:
             continue  # If a model doesn’t provide special tokens, you may skip it.
+        if key == "vocab" and not files:
+            continue  # If a model doesn’t provide vocab.json, you may skip it.
         if key == "model_index" and not files:
             continue  # If a model doesn’t provide model_index, you may skip it.
         if not files:
