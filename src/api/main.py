@@ -34,7 +34,7 @@ class LoggingConnection:
         return getattr(self._connection, name)
 
 # Connect to DuckDB
-raw_con = duckdb.connect(database='duck.db')
+raw_con = duckdb.connect(database='duck.db', read_only=True)
 con = LoggingConnection(raw_con)
 
 app = FastAPI(title="eCFR Analyzer")
