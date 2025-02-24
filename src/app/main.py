@@ -58,13 +58,11 @@ def render_pagination(total_pages: int, current_page: int, key_prefix: str):
             page_range = [1, "..."] + list(range(current_page-2, current_page+3)) + ["...", total_pages]
 
     cols = st.columns(len(page_range)+2)
-    # Prev
     if current_page > 1:
         if cols[0].button("<<", key=f"{key_prefix}_prev"):
             st.session_state[f"{key_prefix}_page"] = current_page - 1
     else:
         cols[0].write("")
-    # Numbers
     idx = 1
     for p in page_range:
         if p == "...":
@@ -76,7 +74,6 @@ def render_pagination(total_pages: int, current_page: int, key_prefix: str):
                 if cols[idx].button(str(p), key=f"{key_prefix}_page_{p}"):
                     st.session_state[f"{key_prefix}_page"] = p
         idx += 1
-    # Next
     if current_page < total_pages:
         if cols[-1].button(">>", key=f"{key_prefix}_next"):
             st.session_state[f"{key_prefix}_page"] = current_page + 1
@@ -194,6 +191,8 @@ if "table_sort" not in st.session_state:
     st.session_state["table_sort"] = "Default"
 if "table_sort_dir" not in st.session_state:
     st.session_state["table_sort_dir"] = "asc"
+if "tutorial_enabled" not in st.session_state:
+    st.session_state["tutorial_enabled"] = True
 
 # ---------------------------
 # Callbacks
@@ -221,11 +220,23 @@ def on_sort_change():
     st.session_state["table_page"] = 1
     cached_get_table.clear()
 
+# Callback for toggling tutorial
+def toggle_tutorial():
+    st.session_state["tutorial_enabled"] = not st.session_state["tutorial_enabled"]
+
 # ---------------------------
 # Sidebar - User Controls
 # ---------------------------
 with st.sidebar:
     st.title("Controls")
+    # Add toggle button at the top of the sidebar
+    st.button(
+        "Turn Off Tutorial" if st.session_state["tutorial_enabled"] else "Turn On Tutorial",
+        on_click=toggle_tutorial,
+        help="Show or hide the tutorial text to guide you through the app."
+    )
+    if st.session_state["tutorial_enabled"]:
+        st.info("**Tutorial:** Use the options below to customize your search. 'Refresh Data' updates the app with the latest regulations. Try typing a keyword like 'water' and selecting an agency to see what happens!")
     st.button("Refresh Data", on_click=on_refresh_click)
     
     with st.form("search_form"):
@@ -236,13 +247,11 @@ with st.sidebar:
             st.text_input("Enter semantic query", key="semantic_query", disabled=True)
         st.form_submit_button("Search", on_click=on_search_submit)
     
-    # Agency filter
     agencies_info = cached_get_agencies()
     agency_list = [a["name"] for a in agencies_info.get("agencies", [])]
     selected_agencies = st.multiselect("Filter by Agency", agency_list, default=[])
     st.session_state["selected_agencies"] = selected_agencies
     
-    # Report selection
     report_id_label = {1: "Core Document Stats", 2: "Section Change Stats"}
     st.session_state["report_id"] = st.selectbox(
         "Select Report",
@@ -252,12 +261,11 @@ with st.sidebar:
         on_change=on_report_select
     )
     
-    # Sort Options
     sort_options = ["Default", "agency", "title", "chapter", "part", "section_count", "total_word_count"]
     st.session_state["table_sort"] = st.selectbox(
         "Sort by",
         sort_options,
-        index=sort_options.index(st.session_state.get("table_sort", "Default")),
+        index=sort_options.index(st.session_state.get("table_sort", "total_word_count")),
         on_change=on_sort_change
     )
     st.session_state["table_sort_dir"] = st.radio(
@@ -271,9 +279,19 @@ with st.sidebar:
 # Main Container - Data Displays
 # ---------------------------
 st.title("eCFR Analyzer")
+if st.session_state["tutorial_enabled"]:
+    st.markdown("""
+    ### Welcome to the eCFR Analyzer!
+    This tool helps you explore and analyze regulations from the *electronic Code of Federal Regulations* (eCFR). 
+    - **What it does:** You can search for specific keywords (like "environment" or "safety"), filter by government agencies, and see summaries, charts, and detailed tables of regulatory data.
+    - **How to use it:** Start by entering a keyword in the sidebar on the left, pick agencies if you want, and hit "Search." Then, check out the results below!
+    - **Why it’s useful:** Whether you're a researcher, lawyer, or just curious, this app makes it easier to understand federal rules without digging through endless documents.
+    """)
 
 # KPI Metrics
 st.subheader("KPI Metrics")
+if st.session_state["tutorial_enabled"]:
+    st.info("**Tutorial:** This section shows quick stats (like total sections or words) based on your search. After searching, you’ll see numbers here summarizing the results.")
 kpi_data = cached_get_kpis(st.session_state["search"], st.session_state["selected_agencies"])
 if kpi_data:
     ccols = st.columns(len(kpi_data))
@@ -286,23 +304,22 @@ else:
 
 # Chart
 st.subheader("Chart")
+if st.session_state["tutorial_enabled"]:
+    st.info("**Tutorial:** This chart compares agencies visually. The bars and lines show different metrics (like section count or changes) for your search term across agencies.")
 chart_info = cached_get_chart(
     st.session_state["search"],
     st.session_state["selected_agencies"],
     st.session_state["report_id"]
 )
 if chart_info:
-    # chart_info is expected to have: labels, series1, and series2.
     df_chart = pd.DataFrame({
         "Agency": chart_info["labels"],
         "Bar": chart_info["series1"],
         "Line": chart_info["series2"]
     })
-    # Sort the dataframe by the bar metric (series1)
     sort_col = "Bar"
     df_chart = df_chart.sort_values(by=sort_col, ascending=False)
     
-    # Create a bar chart for series1 and a line chart for series2
     if st.session_state["report_id"] == 1:
         series_1_title = 'Section Count'
         series_2_title = 'Word Count'
@@ -319,7 +336,6 @@ if chart_info:
         y=alt.Y("Line:Q", title=series_2_title)
     )
     
-    # Layer the charts and allow independent y scales
     layered = alt.layer(bar, line).resolve_scale(y='independent').properties(width=800, height=400)
     st.altair_chart(layered, use_container_width=True)
 else:
@@ -327,6 +343,8 @@ else:
 
 # Table
 st.subheader("Results Table")
+if st.session_state["tutorial_enabled"]:
+    st.info("**Tutorial:** Here’s a table of detailed results. Click a row’s checkbox to see the full text of a regulation with your keyword highlighted. Use the arrows below to flip through pages!")
 st.text("Select a row in the table using the checkbox in the first column.")
 page_num = st.session_state["table_page"]
 skip = (page_num - 1) * TABLE_PAGE_SIZE
