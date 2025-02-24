@@ -110,7 +110,7 @@ def top_words_from_agency_section_ref(
 
 if __name__ == "__main__":
     # Connect to the DuckDB database.
-    con = duckdb.connect(database='duck.db')
+    con = duckdb.connect(database='ecfr_analyzer_local.db')
     # Analyze the top 10 words per agency.
     result = top_words_from_agency_section_ref(con, num=10)
     

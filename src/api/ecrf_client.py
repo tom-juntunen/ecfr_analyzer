@@ -20,31 +20,56 @@ import asyncio
 import httpx
 import json
 import os
+import re
 import calendar
-from datetime import datetime, timedelta
+from hashlib import md5
+from datetime import datetime, date
+from db_loader import merge_jsonl_file
 
-import xmltodict  # pip install xmltodict
+import xmltodict
 
 CONCURRENCY_LIMIT = 6  # maximum concurrent requests
 
-# Date Range Helper
-def generate_date_range(start_date, end_date):
+def generate_date_range(start_date, end_date, month_increment=1):
     """
-    Generates a list of date strings for every day between the start_date and end_date (inclusive).
+    Generates a list of date strings between start_date and end_date (inclusive)
+    corresponding to the last day of each month, with customizable month increments.
     
     Args:
-        start_date (str): Start date in "YYYY-MM-DD" format.
-        end_date (str): End date in "YYYY-MM-DD" format.
+        start_date (str): Start date in "YYYY-MM-DD" format
+        end_date (str): End date in "YYYY-MM-DD" format
+        month_increment (int): Number of months to increment between dates (default: 1)
         
     Returns:
-        List[str]: A list of date strings for each day in the range.
+        List[str]: A list of date strings representing the last day of each month
     """
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    delta_days = (end - start).days + 1
+    dates = []
     
-    return [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(delta_days)]
+    # Initialize with the start month and year
+    year = start.year
+    month = start.month
+    
+    while True:
+        # Determine the last day of the current month
+        last_day = calendar.monthrange(year, month)[1]
+        last_date = date(year, month, last_day)
+        
+        # Only include the last_date if it falls within the range
+        if last_date >= start and last_date <= end:
+            dates.append(last_date.strftime("%Y-%m-%d"))
+        
+        # Move to the next period
+        months_total = year * 12 + month - 1 + month_increment
+        year = months_total // 12
+        month = (months_total % 12) + 1
+        
+        # Break if the first day of the next month is after the end date
+        if date(year, month, 1) > end:
+            break
 
+    return dates
 
 # HTTP and XML Helpers
 async def fetch_url(url, params, semaphore, client, max_retries=3):
@@ -203,7 +228,7 @@ def extract_section_records(data, ancestry=None):
             records.extend(extract_section_records(item, ancestry))
     return records
 
-async def process_xml_request(url, params, semaphore, client, max_retries=3, delay=1.0):
+async def process_xml_request(url, params, semaphore, client, max_retries=3, delay=0.25):
     """
     Special processing for XML endpoints (the full_xml endpoint).
     Sets the Accept header to application/xml, downloads the XML as a stream,
@@ -262,7 +287,33 @@ async def process_section_request(url, params, semaphore, client):
         return []
     section_records = extract_section_records(json_data)
     final_records = []
+    surrogate_id_fields = ["title", "chapter", "part", "subpart"]
     for rec in section_records:
+        id_parts = []
+        subpart_parts = []
+
+        # Regex for matching identifier values for creating primary key
+        pattern = re.compile(
+            r"(?<=TITLE\s)(\S+?(?=(\\u| |-|\u2014)))|(?<=CHAPTER\s)(\S+?(?=(\\u| |-|\u2014)))|(?<=PART\s)(\S+?(?=(\\u| |-|\u2014)))|(?<=SUBPART\s)(\S+?(?=(\\u| |-|\u2014)))",
+            re.IGNORECASE
+        )
+
+        # Build parts from fields
+        for sid in surrogate_id_fields:
+            if sid in rec:
+                id_part = pattern.search(str(rec[sid]).upper())
+                id_part = id_part.group().strip() if id_part else ""
+                id_parts.append(id_part)
+                subpart_parts.append(id_part)  # Same for subpart_id
+        
+        # Join parts with a consistent delimiter
+        id_str = "_".join(id_parts) + f"_{rec.get('@N', '')}"  # Include @N for id
+        subpart_str = "_".join(subpart_parts)  # No @N for subpart_id
+        
+            # Hash the strings
+        rec["id"] = md5(id_str.encode('utf-8')).hexdigest()
+        rec["subpart_id"] = md5(subpart_str.encode('utf-8')).hexdigest()
+
         if "P" in rec:
             joined_records = join_p_records(rec)
             final_records.append(joined_records)
@@ -270,16 +321,15 @@ async def process_section_request(url, params, semaphore, client):
             final_records.append(rec)
     return final_records
 
-# Endpoint Processing and Main
-async def process_endpoint(endpoint, start_date=None, end_date=None, semaphore=None, client=None):
+async def process_endpoint(endpoint, start_date=None, end_date=None, semaphore=None, client=None, delay=1):
     """
     Processes one endpoint as defined by the endpoint dictionary.
     Iterates over date and/or title values, calls the proper processing function
-    (JSON, XML, or section) for each request, and writes results to a JSONL file
-    in the "data" folder.
+    (JSON, XML, or section) for each request, and writes results immediately
+    to a JSONL file in the "data" folder for each date (and title) combination.
     
-    To reduce burst requests and potential 429 rate-limit errors, this function
-    groups requests by title and awaits a delay between processing each title batch.
+    This version writes output immediately after each request to prevent
+    accumulating large amounts of data in memory.
     
     Args:
         endpoint (dict): Endpoint definition.
@@ -287,8 +337,8 @@ async def process_endpoint(endpoint, start_date=None, end_date=None, semaphore=N
         end_date (str): End date in "YYYY-MM-DD" format (if applicable).
         semaphore (asyncio.Semaphore): Semaphore for concurrency limiting.
         client (httpx.AsyncClient): Shared HTTP client.
+        delay (int or float): Delay in seconds between each request.
     """
-    output_data = {}  # keys: output filename; values: list of records
     data_dir = os.path.abspath("data")
     if not os.path.exists(data_dir):
         os.mkdir(data_dir)
@@ -296,56 +346,63 @@ async def process_endpoint(endpoint, start_date=None, end_date=None, semaphore=N
     dates = generate_date_range(start_date, end_date) if endpoint.get("use_date") else [None]
     titles = endpoint.get("titles", []) if endpoint.get("use_title") else [None]
 
-    # Process requests in batches grouped by title.
+    # Process requests sequentially.
     for title in titles:
-        tasks = []
-        output_file_list = []  # maintain mapping for each task to its output file name
         for date in dates:
             # Build URL.
             if "url_template" in endpoint:
-                url = endpoint["url_template"].format(date=date if date else "", title=title if title else "")
+                url = endpoint["url_template"].format(
+                    date=date if date else "",
+                    title=title if title else ""
+                )
             else:
                 url = endpoint["url"]
+
             params = endpoint.get("params", {}).copy()
             if date:
                 params["date"] = date
             if title:
                 params["title"] = title
+
             # Determine output filename for this combination.
             if endpoint.get("output"):
-                output_filename = endpoint["output"].format(date=date if date else "", title=title if title else "")
+                output_filename = endpoint["output"].format(
+                    date=date if date else "",
+                    title=title if title else ""
+                )
                 output_filename = os.path.join(data_dir, output_filename)
             else:
-                output_filename = os.path.join(data_dir, f"{endpoint['name']}.jsonl")
-            output_file_list.append(output_filename)
+                # Default filename using endpoint name and date (or "default" if date is None).
+                date_part = date if date else "default"
+                title_part = title if title else "default"
+                output_filename = os.path.join(data_dir, f"{endpoint['name']}_{title_part}_{date_part}.jsonl")
             
-            # Create the appropriate task.
+            # Process the appropriate request function and await its result.
             if endpoint["name"] == "section":
-                tasks.append(asyncio.create_task(process_section_request(url, params, semaphore, client)))
+                records = await process_section_request(url, params, semaphore, client)
             else:
-                tasks.append(asyncio.create_task(process_request(url, params, endpoint.get("data_key"), semaphore, client)))
-
-            break  # use only the first date for now; TODO: setup historical pipeline for change history and use this there
-        
-        # Await the batch of tasks for the current title.
-        responses = await asyncio.gather(*tasks)
-        for i, records in enumerate(responses):
+                records = await process_request(url, params, endpoint.get("data_key"), semaphore, client)
+                if endpoint["name"] == "agency":
+                    children = [child for rec in records for child in rec.get("children", [])]
+                    records.extend(children)
+            
+            # Write to file immediately if records exist.
             if records:
-                output_data.setdefault(output_file_list[i], []).extend(records)
-        
-        # Sleep between title batches to reduce burst request rates.
-        await asyncio.sleep(1)
-    
-    # Write the gathered data to files.
-    for filename, records in output_data.items():
-        try:
-            with open(filename, "w", encoding="utf-8") as f:
-                for record in records:
-                    f.write(json.dumps(record) + "\n")
-            print(f"Endpoint '{endpoint['name']}' -> Written {len(records)} records to {filename}")
-        except Exception as e:
-            print(f"Error writing to file {filename}: {e}")
+                try:
+                    with open(output_filename, "w", encoding="utf-8") as f:
+                        for record in records:
+                            f.write(json.dumps(record) + "\n")
+                    print(f"Endpoint '{endpoint['name']}' -> Written {len(records)} records to {output_filename}")
 
+                # Merge the data from the file into the database.
+                    merge_jsonl_file(output_filename, date)
+                    print(f"Successfully merged {output_filename} into the database.")
+                except Exception as e:
+                    print(f"Error writing to file {output_filename}: {e}")
+                finally:
+                    # Remove the file after loading
+                    os.remove(output_filename)
+                    # pass
 
 async def main():
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
@@ -373,16 +430,26 @@ async def main():
             "url_template": f"{API_BASE}/versioner/v1/full/{{date}}/title-{{title}}.xml",
             "use_date": True,
             "use_title": True,
-            # "titles": ["7"],  # this one seems to error at times, and it determines our timeout
-            "titles": [str(i+1) for i in range(50) if (i+1) not in [7,35]],  # includes 48 of 50 titles
+            # "titles": [str(i+1) for i in range(50) if (i+1) in [40]], 
+            "titles": [str(i+1) for i in range(50) if (i+1) not in [7, 35]],  # includes 48 of 50 titles
             "data_key": None,
             "output": "section_{date}_title-{title}.jsonl"
         },
+        # {
+        #     "name": "correction",
+        #     "url_template": f"{API_BASE}/admin/v1/corrections/title/{{title}}.json",
+        #     "use_date": False,
+        #     "use_title": True,
+        #     "titles": [str(i+1) for i in range(50) if (i+1) not in [35]],
+        #     "data_key": "ecfr_corrections",
+        #     "output": "correction_title-{title}.jsonl"
+        # },
     ]
 
     # Set desired date range.
-    start_date = "2025-01-06"
-    end_date = "2025-01-13"
+    start_date = "2024-01-01"
+    # start_date = "2024-01-31"
+    end_date = "2025-02-19"
 
     async with httpx.AsyncClient() as client:
         for endpoint in endpoints:

@@ -33,50 +33,36 @@ class LoggingConnection:
     def __getattr__(self, name):
         return getattr(self._connection, name)
 
-# Connect to DuckDB
-# Set MotherDuck Access Token
-# os.environ["MOTHERDUCK_TOKEN"] 
+# Connect to DuckDB (local or Motherduck)
 
-# Connect to MotherDuck database
 raw_con = duckdb.connect(database="md:ecfr_analyzer", read_only=True)
+# raw_con = duckdb.connect(database="ecfr_analyzer_local.db", read_only=True)
 con = LoggingConnection(raw_con)
 
-# Verify connection
 print(con.execute("SELECT 'Connected to MotherDuck!'").fetchone())
 
 app = FastAPI(title="eCFR Analyzer")
 
-# List of approved models (using their Hugging Face repo IDs)
-APPROVED_MODELS = [
-    "gpt2",
-    "bert-base-uncased",
-]
-
-# Pydantic Data Models
-class ModelRequest(BaseModel):
-    model_name: str
-
-class ModelResult(BaseModel):
-    message: str
-    error: str
-
+# --------------------------
+# Pydantic Models
+# --------------------------
 class KPIData(BaseModel):
     metric: str
     value: float
 
 class ChartData(BaseModel):
     labels: List[str]
-    values: List[float]
+    series1: List[float]
+    series2: List[float]
 
 class Agency(BaseModel):
-    display_name: str
+    name: str
     short_name: Optional[str]
     cfr_references: Optional[List[Dict[str, Any]]]
 
 class AgencyResponse(BaseModel):
     agencies: List[Agency]
 
-# Table / Search models
 class TableRow(BaseModel):
     agency: str
     title: str
@@ -86,83 +72,75 @@ class TableRow(BaseModel):
     top_words: List[str]
     section_count: int
     full_text: str
+    count_section_changes: Optional[int] = 0
+    count_section_chars_changed: Optional[int] = 0
+    rolling_60m_avg_sum_p_delta_chars: Optional[float] = 0.0
+    rolling_60m_avg_count_p_deltas: Optional[float] = 0.0
 
 class TableResponse(BaseModel):
     total_count: int
     data: List[TableRow]
 
+# --------------------------
 # Helpers
-def append_search_filter(sql: str, search: str, column:str="{filter_column}") -> Tuple[str, Tuple]:
-    """
-    If 'search' is non-empty, append a LIKE filter on 'column'.
-    """
-    def sanitize(s: str) -> str:
-        return re.sub(r"[;'\"]", "", s.strip())
+# --------------------------
+class SQLBuilder:
+    """Helper class to construct SQL queries with filters consistently"""
+    def __init__(self, base_sql: str):
+        self.sql = base_sql
+        self.params = []
+        self.where_conditions = []
 
-    params = ()
-    if search:
-        s = sanitize(search)
-        if "WHERE" in sql.upper():
-            sql += f" AND LOWER({column}) LIKE ?"
-        else:
-            sql += f" WHERE LOWER({column}) LIKE ?"
-        params = (f"%{s.lower()}%",)
-    return sql, params
+    def add_search_filter(self, search: str, column: str) -> 'SQLBuilder':
+        if search:
+            sanitized = re.sub(r"[;'\"]", "", search.strip()).lower()
+            self.where_conditions.append(f"LOWER({column}) LIKE ?")
+            self.params.append(f"%{sanitized}%")
+        return self
 
-def apply_pagination(sql: str, params: Tuple, skip: int, limit: int) -> Tuple[str, Tuple]:
-    sql += " LIMIT ? OFFSET ?"
-    return sql, params + (limit, skip)
+    def add_agency_filter(self, agencies: List[str]) -> 'SQLBuilder':
+        if agencies:
+            placeholders = ",".join("?" for _ in agencies)
+            self.where_conditions.append(f"c.agency IN ({placeholders})")
+            self.params.extend(agencies)
+        return self
 
-def get_total_count(sql: str, params: tuple) -> int:
-    count_sql = f"SELECT COUNT(*) AS total_count FROM ({sql}) AS sub"
+    def apply_filters(self) -> 'SQLBuilder':
+        if self.where_conditions:
+            self.sql += " WHERE " + " AND ".join(self.where_conditions)
+        return self
+
+    def add_pagination(self, skip: int, limit: int) -> 'SQLBuilder':
+        self.sql += " LIMIT ? OFFSET ?"
+        self.params.extend([limit, skip])
+        return self
+
+    def build(self) -> Tuple[str, List]:
+        return self.sql, self.params
+
+def get_total_count(con, sql: str, params: tuple) -> int:
+    count_sql = f"SELECT COUNT(*) AS total FROM ({sql}) AS subquery"
     df = con.execute(count_sql, params).fetchdf()
-    return int(df.loc[0, "total_count"])
+    return int(df.loc[0, "total"]) if not df.empty else 0
 
-# # Endpoints
-# @app.post("/api/download_model", response_model=ModelResult)
-# async def download_model(model_request: ModelRequest):
-#     """
-#     Download a model from Hugging Face if not already downloaded.
-#     """
-#     model_name = model_request.model_name
-#     if model_name not in APPROVED_MODELS:
-#         return ModelResult(message="", error=f"Model '{model_name}' is not in the approved list.")
-
-#     try:
-#         model_dir = os.path.join("models", model_name.replace("/", "_"))
-#         abs_path = os.path.abspath(model_dir)
-#         if not os.path.exists(model_dir):
-#             from hf_utils import download_model_files
-#             local_dir, downloaded_files = download_model_files(model_name, revision=None)
-#             abs_path = os.path.abspath(local_dir)
-#             message = (
-#                 f"The {model_name} model has been downloaded and saved to {abs_path}.\n"
-#                 f"Files downloaded: {downloaded_files}"
-#             )
-#         else:
-#             message = f"The {model_name} model is already downloaded at {abs_path}."
-#         return ModelResult(message=message, error="")
-#     except Exception as e:
-#         return ModelResult(message="", error=str(e))
-
+# --------------------------
+# Endpoints
+# --------------------------
 @app.get("/api/agency", response_model=AgencyResponse)
 async def agency():
-    """
-    Return a list of all agencies for the filter UI
-    """
     sql = """
         SELECT DISTINCT
-            display_name,
+            name,
             short_name,
             cfr_references
         FROM agency
-        ORDER BY display_name
+        ORDER BY name
     """
     rows = con.execute(sql).fetchall()
     result = []
     for r in rows:
         result.append(Agency(
-            display_name=r[0],
+            name=r[0],
             short_name=r[1],
             cfr_references=r[2]
         ))
@@ -173,145 +151,194 @@ async def get_kpi(
     search: str = Query(""),
     agencies: List[str] = Query([])
 ):
-    """
-    Show aggregated KPI metrics from stg__agg_chapter_part_doc_count
-    (one row per (agency, chapter, part)), optionally filtering by agency & search.
-    """
-    base_sql = """
+    builder = SQLBuilder("""
         SELECT
-            agency,
-            chapter,
-            section_count,
-            total_word_count,
-            top_words,
-            combined_full_text
-        FROM stg__agg_chapter_part_doc_count
+            c.agency,
+            c.section_count,
+            c.total_word_count,
+            c.combined_full_text,
+            m.count_p_deltas,
+            m.sum_p_delta_chars,
+            DATE_TRUNC('MONTH', m.max_valid_from) AS month_trunc
+        FROM stg__agg_chapter_part_doc_count c
+        JOIN stg__agg_section_change_metrics m
+            ON c.id = m.id
+            AND c.agency IS NOT DISTINCT FROM m.agency
+    """)
+    builder.add_search_filter(search, "c.combined_full_text")
+    builder.add_agency_filter(agencies)
+    filtered_base_sql, params = builder.apply_filters().build()
+
+    final_sql = f"""
+    WITH base AS (
+        {filtered_base_sql}
+    ),
+    aggregates AS (
+        SELECT
+            SUM(section_count) AS total_sections,
+            SUM(total_word_count) AS total_words,
+            SUM(count_p_deltas) AS sum_changes,
+            SUM(sum_p_delta_chars) AS sum_length_changes,
+            COUNT(DISTINCT month_trunc) AS month_count
+        FROM base
+    )
+    SELECT
+        COALESCE(total_sections, 0) AS total_sections,
+        COALESCE(total_words, 0) AS total_words,
+        COALESCE(sum_changes * 1.0 / NULLIF(month_count, 0), 0) AS changes_per_month,
+        COALESCE(sum_length_changes * 1.0 / NULLIF(month_count, 0), 0) AS length_changes_per_month
+    FROM aggregates
     """
-    # Filter on combined_full_text if search
-    query_sql, params = append_search_filter(base_sql, search, column="combined_full_text")
+    logger.info("Executing KPI query: %s", final_sql)
+    logger.info("With parameters: %s", params)
+    try:
+        df = con.execute(final_sql, params).fetchdf()
+    except duckdb.duckdb.InvalidInputException as e:
+        logger.error("Query execution failed: %s. Query: %s", str(e), final_sql)
+        raise
 
-    # Agency filter
-    if agencies:
-        placeholders = ",".join("?" for _ in agencies)
-        if "WHERE" in query_sql.upper():
-            query_sql += f" AND agency IN ({placeholders})"
-        else:
-            query_sql += f" WHERE agency IN ({placeholders})"
-        params += tuple(agencies)
+    if df.empty:
+        return [
+            KPIData(metric="Section Count", value=0),
+            KPIData(metric="Word Count", value=0),
+            KPIData(metric="Section Changes / Month", value=0),
+            KPIData(metric="Text Length Change / Month", value=0),
+        ]
 
-    df = con.execute(query_sql, params).fetchdf()
-    total_sections = df["section_count"].sum() if not df.empty else 0
-    total_words = df["total_word_count"].sum() if not df.empty else 0
-
-    # Dummy values for demonstration
-    change_rate = 2.5
-    alignment_score = 88.2
-
+    row = df.iloc[0]
     return [
-        KPIData(metric="Section Count", value=float(total_sections)),
-        KPIData(metric="Word Count",    value=float(total_words)),
-        KPIData(metric="Change Rate",   value=change_rate),
-        KPIData(metric="Alignment Score", value=alignment_score)
+        KPIData(metric="Section Count", value=int(row["total_sections"])),
+        KPIData(metric="Word Count", value=int(row["total_words"])),
+        KPIData(metric="Section Changes / Month", value=int(round(row["changes_per_month"], 0))),
+        KPIData(metric="Text Length Change / Month", value=int(round(row["length_changes_per_month"], 0))),
     ]
-
 
 @app.get("/api/chart", response_model=ChartData)
 async def get_chart(
     search: str = Query(""),
-    agencies: List[str] = Query([])
+    agencies: List[str] = Query([]),
+    report_id: int = Query(1)
 ):
+    # Choose the appropriate metrics based on report_id
+    if report_id == 1:
+        metric1 = "SUM(c.section_count)"
+        metric2 = "SUM(c.total_word_count)"
+    else:
+        metric1 = "SUM(m.count_p_deltas)"
+        metric2 = "SUM(m.sum_p_delta_chars)"
+    
+    base_sql = f"""
+    SELECT 
+        c.agency,
+        {metric1} AS metric1_value,
+        {metric2} AS metric2_value
+    FROM stg__agg_chapter_part_doc_count c
+    JOIN stg__agg_section_change_metrics m
+        ON c.id = m.id
+        AND c.agency IS NOT DISTINCT FROM m.agency
     """
-    Return (labels=agency, values=section_count) from stg__agg_chapter_part_doc_count
-    """
-    base_sql = """
-        SELECT
-            agency,
-            SUM(section_count) AS section_count
-        FROM stg__agg_chapter_part_doc_count
-    """
-    query_sql, params = append_search_filter(base_sql, search, column="combined_full_text")
-
-    if agencies:
-        placeholders = ",".join("?" for _ in agencies)
-        if "WHERE" in query_sql.upper():
-            query_sql += f" AND agency IN ({placeholders})"
-        else:
-            query_sql += f" WHERE agency IN ({placeholders})"
-        params += tuple(agencies)
-
-    query_sql += " GROUP BY agency ORDER BY section_count DESC"
-
-    rows = con.execute(query_sql, params).fetchall()
-    chart_labels = [r[0] for r in rows]   # agency
-    chart_values = [r[1] for r in rows]   # section_count
-    return ChartData(labels=chart_labels, values=chart_values)
+    
+    builder = SQLBuilder(base_sql)
+    builder.add_search_filter(search, "c.combined_full_text")
+    builder.add_agency_filter(agencies)
+    final_sql, params = builder.apply_filters().build()
+    final_sql += " GROUP BY c.agency ORDER BY metric1_value DESC"
+    
+    rows = con.execute(final_sql, params).fetchall()
+    labels = [row[0] for row in rows]
+    series1 = [float(row[1]) for row in rows]
+    series2 = [float(row[2]) for row in rows]
+    
+    return ChartData(labels=labels, series1=series1, series2=series2)
 
 @app.get("/api/table", response_model=TableResponse)
 async def get_table(
     search: str = Query(""),
     agencies: List[str] = Query([]),
+    report_id: int = Query(1),
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    sort: Optional[str] = Query(None),
+    sort_dir: Optional[str] = Query("asc")
 ):
-    """
-    Return data from stg__agg_chapter_part_doc_count_unnested, 
-    with optional search filter on 'full_text' and agency filter.
-    Paginate with skip/limit.
-    """
     base_sql = """
-        SELECT
-            agency,
-            title,
-            chapter,
-            part,
-            section_count,
-            total_word_count,
-            top_words,
-            full_text
-        FROM stg__agg_chapter_part_doc_count_unnested
+    SELECT
+        c.agency,
+        c.title,
+        c.chapter,
+        c.part,
+        c.section_count,
+        c.total_word_count,
+        c.top_words,
+        c.full_text,
+        COALESCE(m.count_p_deltas, 0) AS count_section_changes,
+        COALESCE(m.sum_p_delta_chars, 0) AS count_section_chars_changed,
+        COALESCE(m.rolling_60m_avg_sum_p_delta_chars, 0) AS rolling_60m_avg_sum_p_delta_chars,
+        COALESCE(m.rolling_60m_avg_count_p_deltas, 0) AS rolling_60m_avg_count_p_deltas
+    FROM stg__agg_chapter_part_doc_count_unnested c
+    LEFT JOIN stg__agg_section_change_metrics m
+        ON c.id = m.id
+        AND c.agency IS NOT DISTINCT FROM m.agency
     """
-    query_sql, params = append_search_filter(base_sql, search, column="full_text")
 
-    if agencies:
-        placeholders = ",".join("?" for _ in agencies)
-        if "WHERE" in query_sql.upper():
-            query_sql += f" AND agency IN ({placeholders})"
-        else:
-            query_sql += f" WHERE agency IN ({placeholders})"
-        params += tuple(agencies)
+    # Build filtered SQL for counting
+    count_builder = SQLBuilder(base_sql)
+    count_builder.add_search_filter(search, "c.full_text")
+    count_builder.add_agency_filter(agencies)
+    count_sql, count_params = count_builder.apply_filters().build()
+    total_count = get_total_count(con, count_sql, tuple(count_params))
 
-    # Now we get the total_count
-    total_count = get_total_count(query_sql, params)
+    # Build paginated SQL
+    data_builder = SQLBuilder(base_sql)
+    data_builder.add_search_filter(search, "c.full_text")
+    data_builder.add_agency_filter(agencies)
+    data_builder.apply_filters()
+    
+    # Allowed sort fields to prevent SQL injection
+    allowed_sort_fields = {
+        "agency": "c.agency",
+        "title": "c.title",
+        "chapter": "c.chapter",
+        "part": "c.part",
+        "section_count": "c.section_count",
+        "total_word_count": "c.total_word_count"
+    }
+    if sort and sort in allowed_sort_fields:
+        # Validate sort direction
+        sort_direction = "ASC" if sort_dir.lower() != "desc" else "DESC"
+        data_builder.sql += f" ORDER BY {allowed_sort_fields[sort]} {sort_direction}"
+    else:
+        data_builder.sql += " ORDER BY c.total_word_count, c.agency, c.chapter, c.part"
+    
+    data_builder.add_pagination(skip, limit)
+    final_sql, params = data_builder.build()
 
-    # Pagination
-    query_sql, params = apply_pagination(query_sql, params, skip, limit)
-    df_page = con.execute(query_sql, params).fetchdf()
-
-    # Build the response
-    data_rows = []
-    for _, row in df_page.iterrows():
-        data_rows.append(TableRow(
+    df = con.execute(final_sql, tuple(params)).fetchdf()
+    data_rows = [
+        TableRow(
             agency=row["agency"],
-            title=row["title"],
-            chapter=row["chapter"],
-            part=row["part"],
-            total_word_count=row["total_word_count"],
-            top_words=row["top_words"].split(", ") if row["top_words"] else [],
-            section_count=row["section_count"],
-            full_text=row["full_text"]
-        ))
+            title=str(row["title"]),
+            chapter=str(row["chapter"]),
+            part=str(row["part"]),
+            section_count=int(row["section_count"]),
+            total_word_count=int(row["total_word_count"]),
+            top_words=row["top_words"].split(", ") if pd.notna(row["top_words"]) else [],
+            full_text=row["full_text"] or "",
+            count_section_changes=int(row["count_section_changes"]),
+            count_section_chars_changed=int(row["count_section_chars_changed"]),
+            rolling_60m_avg_sum_p_delta_chars=float(row["rolling_60m_avg_sum_p_delta_chars"]),
+            rolling_60m_avg_count_p_deltas=float(row["rolling_60m_avg_count_p_deltas"])
+        )
+        for _, row in df.iterrows()
+    ]
+
     return TableResponse(total_count=total_count, data=data_rows)
 
 @app.get("/api/refresh")
 async def refresh_data():
-    """
-    Fake refresh endpoint
-    """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {"detail": "Data refreshed successfully", "last_refreshed": now}
 
-
-# Local run
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

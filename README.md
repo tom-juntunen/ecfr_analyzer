@@ -2,7 +2,7 @@
 ### Description:
 The eCFR Analyzer is a simple website to analyze U.S. Federal Regulations. The eCFR is available at https://www.ecfr.gov/. The public API is documented at https://www.ecfr.gov/developers/documentation/api/v1.
 
-The website allows a user to download the current eCFR and analyze it for items such as word count per agency and historical changes over time. Custom metrics include an alignment score that measures the **insert technical term** between the regulations and their changes compared to stated goals. 
+The website allows a user to analyze the eCFR for items such as word count per agency and historical changes over time. Custom metrics include an alignment score that measures the **insert technical term** between the regulations and their changes compared to stated goals. 
 
 The website also allows a user to visualize the content, explore the data, and query search terms. 
 
