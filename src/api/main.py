@@ -1,6 +1,6 @@
 import os
 import logging
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Header, HTTPException, status, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -16,6 +16,21 @@ nest_asyncio.apply()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# --------------------------
+# API Key Dependency
+# --------------------------
+def verify_api_key(ecfr_api_key: str = Header(...)):
+    """Dependency that validates the API key from the request header."""
+    expected_key = os.getenv("ECFR_API_KEY")
+    if not expected_key or ecfr_api_key != expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API Key",
+        )
+
+# --------------------------
+# Database Connection and Helpers
+# --------------------------
 class LoggingConnection:
     def __init__(self, connection):
         self._connection = connection
@@ -34,7 +49,6 @@ class LoggingConnection:
         return getattr(self._connection, name)
 
 # Connect to DuckDB (local or Motherduck)
-
 raw_con = duckdb.connect(database="md:ecfr_analyzer", read_only=True)
 # raw_con = duckdb.connect(database="ecfr_analyzer_local.db", read_only=True)
 con = LoggingConnection(raw_con)
@@ -126,7 +140,7 @@ def get_total_count(con, sql: str, params: tuple) -> int:
 # --------------------------
 # Endpoints
 # --------------------------
-@app.get("/api/agency", response_model=AgencyResponse)
+@app.get("/api/agency", response_model=AgencyResponse, dependencies=[Depends(verify_api_key)])
 async def agency():
     sql = """
         SELECT DISTINCT
@@ -146,7 +160,7 @@ async def agency():
         ))
     return AgencyResponse(agencies=result)
 
-@app.get("/api/kpi", response_model=List[KPIData])
+@app.get("/api/kpi", response_model=List[KPIData], dependencies=[Depends(verify_api_key)])
 async def get_kpi(
     search: str = Query(""),
     agencies: List[str] = Query([])
@@ -213,7 +227,7 @@ async def get_kpi(
         KPIData(metric="Text Length Change / Month", value=int(round(row["length_changes_per_month"], 0))),
     ]
 
-@app.get("/api/chart", response_model=ChartData)
+@app.get("/api/chart", response_model=ChartData, dependencies=[Depends(verify_api_key)])
 async def get_chart(
     search: str = Query(""),
     agencies: List[str] = Query([]),
@@ -251,7 +265,7 @@ async def get_chart(
     
     return ChartData(labels=labels, series1=series1, series2=series2)
 
-@app.get("/api/table", response_model=TableResponse)
+@app.get("/api/table", response_model=TableResponse, dependencies=[Depends(verify_api_key)])
 async def get_table(
     search: str = Query(""),
     agencies: List[str] = Query([]),
@@ -334,7 +348,7 @@ async def get_table(
 
     return TableResponse(total_count=total_count, data=data_rows)
 
-@app.get("/api/refresh")
+@app.get("/api/refresh", dependencies=[Depends(verify_api_key)])
 async def refresh_data():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return {"detail": "Data refreshed successfully", "last_refreshed": now}

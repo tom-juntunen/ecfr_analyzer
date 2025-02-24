@@ -6,6 +6,7 @@ import nest_asyncio
 from math import ceil
 import altair as alt
 import re
+import os
 from typing import Any, Dict, List, Tuple
 
 st.set_page_config(
@@ -20,6 +21,7 @@ nest_asyncio.apply()
 API_URL = "https://ecfr-analyzer-api-a84b944f87af.herokuapp.com/api"
 # API_URL = "http://localhost:8000/api"
 TABLE_PAGE_SIZE = 50
+headers = {"ecfr-api-key": os.getenv("ECFR_API_KEY")}
 
 # ---------------------------
 # Helper Functions
@@ -86,18 +88,18 @@ def render_pagination(total_pages: int, current_page: int, key_prefix: str):
 # ---------------------------
 async def refresh_api():
     async with httpx.AsyncClient() as client:
-        return await client.get(f"{API_URL}/refresh", timeout=30.0)
+        return await client.get(f"{API_URL}/refresh", timeout=30.0, headers=headers)
 
 async def get_refresh_info():
     async with httpx.AsyncClient() as client:
-        r = await client.get(f"{API_URL}/refresh", timeout=30.0)
+        r = await client.get(f"{API_URL}/refresh", timeout=30.0, headers=headers)
         if r.status_code == 200:
             return r.json().get("last_refreshed", "")
     return ""
 
 async def get_agency_list():
     async with httpx.AsyncClient() as client:
-        return await client.get(f"{API_URL}/agency", timeout=30.0)
+        return await client.get(f"{API_URL}/agency", timeout=30.0, headers=headers)
 
 async def get_kpi_data(search_query: str, agencies: List[str]):
     if not search_query and not agencies:
@@ -106,7 +108,7 @@ async def get_kpi_data(search_query: str, agencies: List[str]):
         params = [("search", search_query)]
         for a in agencies:
             params.append(("agencies", a))
-        return await client.get(f"{API_URL}/kpi", params=params, timeout=30.0)
+        return await client.get(f"{API_URL}/kpi", params=params, timeout=30.0, headers=headers)
 
 async def get_chart_data(search_query: str, agencies: List[str], report_id: int):
     if not search_query and not agencies:
@@ -115,7 +117,7 @@ async def get_chart_data(search_query: str, agencies: List[str], report_id: int)
         params = [("search", search_query), ("report_id", str(report_id))]
         for a in agencies:
             params.append(("agencies", a))
-        return await client.get(f"{API_URL}/chart", params=params, timeout=30.0)
+        return await client.get(f"{API_URL}/chart", params=params, timeout=30.0, headers=headers)
 
 async def get_table_data(
     search_query: str,
@@ -140,7 +142,7 @@ async def get_table_data(
         if sort and sort != "Default":
             params.append(("sort", sort))
             params.append(("sort_dir", sort_dir))
-        return await client.get(f"{API_URL}/table", params=params, timeout=30.0)
+        return await client.get(f"{API_URL}/table", params=params, timeout=30.0, headers=headers)
 
 # ---------------------------
 # Caching Wrappers
