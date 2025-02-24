@@ -13,7 +13,7 @@ import os
 
 # Connect to the in-memory DuckDB instance where data is assumed to be loaded.
 # con = duckdb.connect(database=':memory:')
-con = duckdb.connect(database='duck.db')
+con = duckdb.connect(database='ecfr_analyzer_local.db')
 
 def test_tables_exist():
     """Check if the expected tables exist in the database."""

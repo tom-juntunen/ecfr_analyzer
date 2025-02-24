@@ -1,9 +1,9 @@
 """
 db_loader.py
 
-A module to load each JSONL file in the "data" folder into an in‑memory DuckDB database.
+A module to load each JSONL file in the "data" folder into a DuckDB database.
 The table name is determined by the route name (endpoint name) as inferred from the file name.
-
+Now includes a merge_jsonl_file() function that performs SCD Type 2 merging for the "section" table.
 Usage:
     python db_loader.py
 """
@@ -13,331 +13,254 @@ import glob
 import json
 import duckdb
 import pandas as pd
-import re
+
+from db_models import models
 
 # Define known endpoint names – adjust as needed.
 endpoint_names = ["agency", "title", "section"]
-model_names = ["base__agency_section"]
 
 data_dir = os.path.abspath("data")
 if not os.path.exists(data_dir):
     print("Data directory does not exist. Please run ecfr_client.py first.")
     exit(1)
 
-# Connect to an in-memory DuckDB instance.
-# con = duckdb.connect(database=':memory:')
-con = duckdb.connect(database='duck.db')
+# Connect to a DuckDB database (file-based).
+con = duckdb.connect(database='ecfr_analyzer_local.db')
 
-# Function to determine the table name based on the file name.
 def get_table_name(filename):
-    # For each known endpoint name, check if the file name starts with it.
+    """
+    Determines the table name based on the file name.
+    """
     for name in endpoint_names:
         if filename.startswith(name):
             return name
-    # Fallback: use the filename (without extension) as table name.
-    return os.path.splitext(filename)[0]
+    return os.path.splitext(filename)[0].split('_')[0]
 
-def sanitize_identifier(identifier):
-    # Only allow letters, numbers, and underscores, and must start with a letter or underscore.
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", identifier):
-        raise ValueError("Invalid identifier")
-    return identifier
+def merge_jsonl_file(file_path, valid_from_date):
+    """
+    Reads a JSONL file from the data folder and merges its contents into the database.
+    For the "section" table, applies SCD Type 2 logic:
+      - If the table does not exist yet, creates it with SCD fields.
+      - If it exists, expires current records that have changed and inserts new rows.
+    For other endpoints, simply loads the data.
+    
+    Args:
+        file_path (str): Path to the JSONL file.
+        valid_from_date (str): Date string for the record snapshot date in YYYY-MM-DD format.
+    """
+    filename = os.path.basename(file_path)
+    table_name = get_table_name(filename)
+    if not table_name:
+        print(f"Could not determine table name for file: {filename}")
+        return
 
-# Process all JSONL files in the data folder.
-jsonl_files = glob.glob(os.path.join(data_dir, "*.jsonl"))
-
-# Set a flag to track whether the section table has been created
-section_table_created = False
-
-for filepath in jsonl_files:
-    filename = os.path.basename(filepath)
-    table_name = sanitize_identifier(get_table_name(filename))
+    # Read JSONL file into a DataFrame
     records = []
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             try:
                 records.append(json.loads(line))
             except Exception as e:
                 print(f"Error parsing line in {filename}: {e}")
 
-    if records:
-        df = pd.DataFrame(records)
-        if table_name == 'section':
-            # Convert fields that might be dictionaries to JSON strings.
-            for col in ['CITA', 'EDNOTE']:
-                if col in df.columns:
-                    df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, dict) else x)
-                else:
-                    df[col] = ''
-            # Ensure optional columns exist in the data frame
-            opt_cols = ['subtitle', 'subchapter', 'subpart', '@VOLUME']
-            for o_col in opt_cols:
-                if o_col not in df.columns:
-                    df[o_col] = ''
-
-            if not section_table_created:
-                # Create the table for the first file
-                con.execute(f"""
-                    CREATE OR REPLACE TABLE {table_name} AS 
-                    SELECT 
-                        md5(concat(title, '_surrogate_key_', chapter, part, subpart, HEAD, P)) AS id,
-                        md5(concat(title, '_surrogate_key_', chapter, part, subpart)) AS subpart_id,
-                        title,
-                        CAST(SPLIT_PART(SPLIT_PART(title, '\u2014', 1), ' ', 2) AS INTEGER) AS cfr_ref_title,
-                        subtitle,
-                        chapter,
-                        SPLIT_PART(SPLIT_PART(chapter, '\u2014', 1), ' ', 2) AS cfr_ref_chapter,
-                        subchapter,
-                        part,
-                        subpart,
-                        CAST("@N" AS VARCHAR) AS n,
-                        CAST("@TYPE" AS VARCHAR) AS type,
-                        CAST("@VOLUME" AS VARCHAR) AS volume,
-                        CAST(HEAD AS VARCHAR) AS head,
-                        CAST(P AS VARCHAR) AS p,
-                        CAST(CITA AS VARCHAR) AS cita,
-                        CAST(EDNOTE AS VARCHAR) AS ednote
-                    FROM df
-                """)
-                section_table_created = True
-            else:
-                # Insert new data into the existing table for subsequent files
-                con.execute(f"""
-                    INSERT INTO {table_name}
-                    SELECT 
-                        md5(concat(title, '_surrogate_key_', chapter, part, subpart, HEAD, P)) AS id,
-                        md5(concat(title, '_surrogate_key_', chapter, part, subpart)) AS subpart_id,
-                        title,
-                        CAST(SPLIT_PART(SPLIT_PART(title, '\u2014', 1), ' ', 2) AS INTEGER) AS cfr_ref_title,
-                        subtitle,
-                        chapter,
-                        SPLIT_PART(SPLIT_PART(chapter, '\u2014', 1), ' ', 2) AS cfr_ref_chapter,
-                        subchapter,
-                        part,
-                        subpart,
-                        CAST("@N" AS VARCHAR) AS n,
-                        CAST("@TYPE" AS VARCHAR) AS type,
-                        CAST("@VOLUME" AS VARCHAR) AS volume,
-                        CAST(HEAD AS VARCHAR) AS head,
-                        CAST(P AS VARCHAR) AS p,
-                        CAST(CITA AS VARCHAR) AS cita,
-                        CAST(EDNOTE AS VARCHAR) AS ednote
-                    FROM df
-                """)
-        elif table_name == 'agency':
-            # Write both agency and agency_section_ref tables here
-            con.execute("CREATE OR REPLACE TABLE agency AS SELECT * FROM df")
-            con.execute("""
-                CREATE OR REPLACE TABLE agency_section_ref 
-                AS 
-                SELECT
-                    a.slug,
-                    CAST(REPLACE((ref)->'unnest'->'title', '"', '') AS INTEGER) AS cfr_ref_title,
-                    CAST(REPLACE((ref)->'unnest'->'chapter', '"', '') AS VARCHAR) AS cfr_ref_chapter
-                FROM agency a
-                CROSS JOIN UNNEST(a.cfr_references) AS ref
-            """)
-        else:
-            # For other endpoints, load the whole DataFrame.
-            con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM df")
-        print(f"Loaded {len(df)} records into table '{table_name}' from {filename}")
-    else:
+    if not records:
         print(f"No records found in {filename}")
+        return
 
-# list the tables loaded.
-tables = con.execute("SHOW TABLES").fetchall()
-print("\nTables in DuckDB in-memory database:")
-for t in tables:
-    print(t[0])
+    df = pd.DataFrame(records)
 
-# # Building models (without dbt for now)
+    if table_name == 'section':
+        # Convert dictionary columns to JSON strings if necessary
+        for col in ['CITA', 'EDNOTE']:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda x: json.dumps(x) if isinstance(x, (dict, list)) else x)
+            else:
+                df[col] = ''
+        
+        # Ensure optional columns exist and handle renaming
+        column_mapping = {
+            'subtitle': 'subtitle',
+            'subchapter': 'subchapter',
+            'subpart': 'subpart',
+            '@VOLUME': 'volume',
+            'HEAD': 'head',
+            'P': 'p'
+        }
+        for src_col, tgt_col in column_mapping.items():
+            if src_col not in df.columns:
+                df[tgt_col] = ''
+            elif src_col != tgt_col:
+                df[tgt_col] = df[src_col]
+                df.drop(columns=[src_col], inplace=True)
+        
+        # Add valid_from if not present
+        if 'valid_from' not in df.columns:
+            df['valid_from'] = valid_from_date
 
-models = {
-    "base__agency_section": {
-        "query": """
-            SELECT 
-                a.name AS agency,
-                s.chapter,
-                s.title,
-                s.subtitle,
-                s.part,
-                s.subpart,
-                s.subpart_id,
-                s.HEAD AS header_text,
-                s.p AS paragraph_text,
-                COALESCE(s.HEAD || ' ' || s.p, '') AS full_text
+        # Add p_delta_chars if not present (default to 0)
+        if 'p_delta_chars' not in df.columns:
+            df['p_delta_chars'] = 0
+
+        # Get filter for delete tracking
+        df.fillna({'title': ' '}, inplace=True)
+        df.fillna({'chapter': ' '}, inplace=True)
+        df['cfr_ref_title'] = df['title'].apply(lambda x: x.split(' ')[1] if '\u2014' not in x else x.split('\u2014')[0].split(' ')[1])
+        df['cfr_ref_chapter'] = df['chapter'].apply(lambda x: x.split(' ')[1] if '\u2014' not in x else x.split('\u2014')[0].split(' ')[1])
+        cfr_ref_title = df.iloc[0]['cfr_ref_title']
+
+        # 1. Create the target table if it doesn't exist
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS section (
+                id VARCHAR,
+                subpart_id VARCHAR,
+                title VARCHAR,
+                cfr_ref_title INTEGER,
+                subtitle VARCHAR,
+                chapter VARCHAR,
+                cfr_ref_chapter VARCHAR,
+                subchapter VARCHAR,
+                part VARCHAR,
+                subpart VARCHAR,
+                n VARCHAR,
+                head VARCHAR,
+                p VARCHAR,
+                p_delta_chars INTEGER,
+                valid_from DATE,
+                valid_to DATE,
+                is_current BOOLEAN,
+                is_deleted BOOLEAN,
+                PRIMARY KEY (id, valid_from)
+            );
+        """)
+
+        # 2. Insert new/updated records with p_delta_chars on the new record
+        insert_query = """
+        INSERT INTO section (
+            id, subpart_id, title, cfr_ref_title, subtitle, chapter, cfr_ref_chapter,
+            subchapter, part, subpart, n, head, p, p_delta_chars, valid_from, valid_to,
+            is_current, is_deleted
+        )
+        WITH prev AS (
+            SELECT id, p
+            FROM section
+            WHERE is_current = TRUE
+        )
+        SELECT 
+            s.id,
+            s.subpart_id,
+            s.title,
+            s.cfr_ref_title,
+            s.subtitle,
+            s.chapter,
+            s.cfr_ref_chapter,
+            s.subchapter,
+            s.part,
+            s.subpart,
+            s."@N" AS n,
+            s.HEAD AS head,
+            s.P AS p,
+            CASE 
+                WHEN prev.id IS NOT NULL THEN LENGTH(s.P) - LENGTH(prev.p)
+                ELSE 0 
+            END AS p_delta_chars,
+            s.valid_from,
+            CAST('9999-12-31' AS DATE) AS valid_to,
+            TRUE AS is_current,
+            FALSE AS is_deleted
+        FROM df s
+        LEFT JOIN prev 
+            ON s.id = prev.id
+        WHERE prev.id IS NULL OR prev.p IS DISTINCT FROM s.P
+        """
+        con.execute(insert_query)
+
+        # 3. Expire updated records in the target table
+        update_query = """
+        UPDATE section
+        SET 
+            valid_to = (SELECT s.valid_from FROM df s WHERE s.id = section.id),
+            is_current = FALSE
+        WHERE is_current = TRUE
+        AND EXISTS (
+            SELECT 1 FROM df s
+            WHERE s.id = section.id 
+            AND section.p IS DISTINCT FROM s.P
+        );
+        """
+        con.execute(update_query)
+
+        # 4. Expire (mark as deleted) records not in df
+        delete_update_query = """
+        UPDATE section
+        SET 
+            valid_to = ?,
+            is_current = FALSE,
+            is_deleted = TRUE
+        WHERE is_current = TRUE
+        AND NOT EXISTS (
+            SELECT 1 FROM df s 
+            WHERE s.id = section.id
+        )
+        AND cfr_ref_title = CAST(? AS INTEGER);
+        """
+        con.execute(delete_update_query, [valid_from_date, cfr_ref_title])
+
+        print(f"Merged {len(df)} records into table 'section' using SCD2 logic from {filename}.")
+
+    elif table_name == 'agency':
+        # Write both agency and agency_section_ref tables
+        con.execute("CREATE OR REPLACE TABLE agency AS SELECT * FROM df")
+        con.execute("""
+            CREATE OR REPLACE TABLE agency_section_ref 
+            AS 
+            SELECT
+                a.slug,
+                CAST(REPLACE((ref)->'unnest'->'title', '"', '') AS INTEGER) AS cfr_ref_title,
+                CAST(REPLACE((ref)->'unnest'->'chapter', '"', '') AS VARCHAR) AS cfr_ref_chapter
             FROM agency a
-            JOIN agency_section_ref r 
-                ON a.slug = r.slug
-            JOIN section s 
-                ON CAST(s.cfr_ref_title AS INTEGER) = r.cfr_ref_title
-               AND s.cfr_ref_chapter IS NOT DISTINCT FROM r.cfr_ref_chapter
-            ORDER BY a.name, s.title, s.chapter
-        """,
-        "type": "table",
-        "stmt_type": "create"
-    },
-
-    "stg__agg_chapter_part_doc_count": {
-        "query": """
-            WITH base_filtered AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    -- Combine all text for this agency + chapter + part
-                    STRING_AGG(full_text, '\n\n') AS combined_full_text,
-                    COUNT(*) AS section_count
-                FROM base__agency_section
-                GROUP BY agency, title, chapter, part
-            ),
-
-            -- 2) Expand tokens for counting
-            expanded AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    section_count,
-                    combined_full_text,
-                    SPLIT(REPLACE(combined_full_text, '  ', ' '), ' ') AS all_tokens
-                FROM base_filtered
-            ),
-
-            -- 3) Unnest into rows
-            unnested AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    section_count,
-                    TRIM(token) AS token
-                FROM expanded
-                CROSS JOIN UNNEST(all_tokens) AS t(token)
-            ),
-
-            -- 4) Exclude stopwords, count frequencies
-            counts AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    section_count,
-                    token,
-                    COUNT(*) AS cnt
-                FROM unnested
-                WHERE 
-                    NOT REGEXP_MATCHES(
-                        token,
-                        '^(§|a|about|above|after|again|against|all|am|an|and|any|are|aren''t|as|at|be|because|been|before|being|below|between|both|but|by|b|can|can''t|cannot|could|could''t|cfr|c|did|did''t|do|does|does''t|doing|don''t|down|during|d|each|e|few|for|from|further|had|had''t|has|has''t|have|haven''t|having|he|he''d|he''ll|he''s|her|here|here''s|hers|herself|him|himself|his|how|how''s|i|i''d|i''ll|i''m|i''ve|if|in|into|is|isn''t|it|it''s|its|itself|let''s|me|may|more|most|must|mustn''t|my|myself|no|nor|not|of|off|on|once|only|or|other|ought|our|ours|ourselves|out|over|own|paragraph|part|required|reserved|same|section|shall|shan''t|she|she''d|she''ll|she''s|should|shouldn''t|so|s|some|such|subpart|''#text'':|than|that|that''s|the|their|theirs|them|themselves|then|there|there''s|these|they|they''d|they''ll|they''re|they''ve|this|those|through|to|too|under|until|up|u|very|was|wasn''t|we|we''d|we''ll|we''re|we''ve|were|weren''t|what|what''s|when|when''s|where|where''s|which|while|who|who''s|whom|why|why''s|with|won''t|would|wouldn''t|you|you''d|you''ll|you''re|you''ve|your|yours|yourself|yourselves)$',
-                        'i'
-                    )
-                    AND NOT REGEXP_MATCHES(token, '^(\\d+|{''[@A-Z]+'':)$')
-                GROUP BY agency, title, chapter, part, section_count, token
-            ),
-
-            -- 5) Rank top tokens
-            ranked AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    section_count,
-                    token,
-                    cnt,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY agency, chapter, part
-                        ORDER BY cnt DESC
-                    ) AS rnk
-                FROM counts
-            ),
-
-            top15 AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    section_count,
-                    STRING_AGG(token || ' (' || cnt || ')', ', ') AS top_words
-                FROM ranked
-                WHERE rnk <= 15
-                GROUP BY agency, title, chapter, part, section_count
-            ),
-
-            -- 6) Count total words
-            word_counts AS (
-                SELECT
-                    agency,
-                    title,
-                    chapter,
-                    part,
-                    section_count,
-                    SUM(array_length(all_tokens, 1)) AS total_word_count
-                FROM expanded
-                GROUP BY agency, title, chapter, part, section_count
-            )
-
-            -- 7) Combine them all
-            SELECT
-                wc.agency,
-                wc.title,
-                wc.chapter,
-                wc.part,
-                wc.section_count,
-                wc.total_word_count,
-                t.top_words,
-                bf.combined_full_text
-            FROM word_counts wc
-            JOIN top15 t
-              ON t.agency         = wc.agency
-              AND t.title         = wc.title
-             AND t.chapter        = wc.chapter
-             AND t.part        = wc.part
-             AND t.section_count = wc.section_count
-            JOIN base_filtered bf
-              ON bf.agency  = wc.agency
-              AND bf.title  = wc.title
-             AND bf.chapter = wc.chapter
-             AND bf.part = wc.part
-            ORDER BY total_word_count DESC
-
-        """,
-        "type": "table",
-        "stmt_type": "create"
-    },
-    "stg__agg_chapter_part_doc_count_unnested": {
-        "query": """
-            SELECT
-                agency,
-                title,
-                chapter,
-                part,
-                section_count,
-                total_word_count,
-                top_words,
-                UNNEST(STRING_SPLIT(combined_full_text, '\n\n')) AS full_text
-            FROM stg__agg_chapter_part_doc_count
-        """,
-        "type": "table",
-        "stmt_type": "create"
-    }
+            CROSS JOIN UNNEST(a.cfr_references) AS ref
+        """)
+        print(f"Loaded {len(df)} records into table 'agency' and created 'agency_section_ref' from {filename}.")
     
-}
+    else:
+        # For other endpoints, load the whole DataFrame
+        con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM df")
+        print(f"Loaded {len(df)} records into table '{table_name}' from {filename}.")
 
-print(f"Creating data models and counting keywords per agency...")
-for model in models:
-    query = models[model]["query"]
-    if models[model]["stmt_type"] == "create":
-        query = f'CREATE OR REPLACE TABLE {model} AS (' + query + ')'
-        try:
-            con.execute(query)
-        except Exception as e:
-            print(e)
-        else:
-            print(f"Table {model} successfully created.")
+
+
+if __name__ == "__main__":
+    # If run as a script, process all JSONL files in the data folder
+    jsonl_files = glob.glob(os.path.join(data_dir, "*.jsonl"))
+    if not jsonl_files:
+        print("No JSONL files found in data directory.")
+    else:
+        # Using current date as default valid_from; adjust as needed
+        from datetime import date
+        valid_from = date.today().isoformat()
+        
+        # for filepath in jsonl_files:
+        #     merge_jsonl_file(filepath, valid_from)
+
+        # List the tables loaded
+        tables = con.execute("SHOW TABLES").fetchall()
+        print("\nTables in DuckDB database:")
+        for t in tables:
+            print(t[0])
+            
+        # # Building models (without dbt for now)
+        print(f"Creating data models...")
+        for model in models:
+            query = models[model]["query"]
+            if models[model]["stmt_type"] == "create":
+                query = f'CREATE OR REPLACE TABLE {model} AS (' + query + ')'
+                try:
+                    con.execute(query)
+                except Exception as e:
+                    print(e)
+                else:
+                    print(f"Table {model} successfully created.")
+
+    # Close the connection
+    con.close()
+

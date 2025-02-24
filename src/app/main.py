@@ -6,23 +6,24 @@ import nest_asyncio
 from math import ceil
 import altair as alt
 import re
-from hashlib import md5
 from typing import Any, Dict, List, Tuple
 
 st.set_page_config(
-    page_title="eCFR Analyzer",
+    page_title="eCFR Analyzer: Regulatory Insights",
     layout="wide",
     page_icon="🔎"
 )
 
 nest_asyncio.apply()
 
-# API_URL = "http://localhost:8000/api"
+# Point this to your local or deployed FastAPI
 API_URL = "https://ecfr-analyzer-api-a84b944f87af.herokuapp.com/api"
-APPROVED_MODELS = ["gpt2", "bert-base-uncased"]
+# API_URL = "http://localhost:8000/api"
 TABLE_PAGE_SIZE = 50
 
-# Helper: highlight keywords
+# ---------------------------
+# Helper Functions
+# ---------------------------
 def highlight_keyword(text: str, keyword: str) -> Tuple[str, bool]:
     if not keyword:
         return text, False
@@ -31,20 +32,16 @@ def highlight_keyword(text: str, keyword: str) -> Tuple[str, bool]:
 
     def replacer(m):
         nonlocal first_found
-        highlighted = f"<span style='background-color: yellow; font-weight: bold;'>{m.group(0)}</span>"
-        return highlighted
+        first_found = True
+        return f"<span style='background-color: yellow; font-weight: bold;'>{m.group(0)}</span>"
 
     replaced = pattern.sub(replacer, text)
     return replaced, first_found
 
 def show_full_text_with_highlights(text: str, query: str):
-    """
-    Beautify the text, highlight the query, then display in markdown.
-    """
-    h, found = highlight_keyword(text, query)
+    h, _ = highlight_keyword(text, query)
     st.markdown(h, unsafe_allow_html=True)
 
-# Pagination
 def render_pagination(total_pages: int, current_page: int, key_prefix: str):
     if total_pages <= 1:
         return
@@ -54,18 +51,19 @@ def render_pagination(total_pages: int, current_page: int, key_prefix: str):
         if current_page <= 5:
             page_range = list(range(1,8)) + ["...", total_pages]
         elif current_page >= total_pages-4:
-            page_range = [1, "..."] + list(range(total_pages-6,total_pages+1))
+            page_range = [1, "..."] + list(range(total_pages-6, total_pages+1))
         else:
-            page_range = [1, "..."] + list(range(current_page-2,current_page+3)) + ["...", total_pages]
+            page_range = [1, "..."] + list(range(current_page-2, current_page+3)) + ["...", total_pages]
 
     cols = st.columns(len(page_range)+2)
+    # Prev
     if current_page > 1:
         if cols[0].button("<<", key=f"{key_prefix}_prev"):
             st.session_state[f"{key_prefix}_page"] = current_page - 1
     else:
         cols[0].write("")
-
-    idx=1
+    # Numbers
+    idx = 1
     for p in page_range:
         if p == "...":
             cols[idx].write("...")
@@ -75,56 +73,78 @@ def render_pagination(total_pages: int, current_page: int, key_prefix: str):
             else:
                 if cols[idx].button(str(p), key=f"{key_prefix}_page_{p}"):
                     st.session_state[f"{key_prefix}_page"] = p
-        idx+=1
-
+        idx += 1
+    # Next
     if current_page < total_pages:
         if cols[-1].button(">>", key=f"{key_prefix}_next"):
             st.session_state[f"{key_prefix}_page"] = current_page + 1
     else:
         cols[-1].write("")
 
-# Async calls
+# ---------------------------
+# Async API calls
+# ---------------------------
 async def refresh_api():
     async with httpx.AsyncClient() as client:
-        return await client.get(f"{API_URL}/refresh")
+        return await client.get(f"{API_URL}/refresh", timeout=30.0)
 
 async def get_refresh_info():
     async with httpx.AsyncClient() as client:
-        r = await client.get(f"{API_URL}/refresh")
+        r = await client.get(f"{API_URL}/refresh", timeout=30.0)
         if r.status_code == 200:
             return r.json().get("last_refreshed", "")
     return ""
 
 async def get_agency_list():
     async with httpx.AsyncClient() as client:
-        return await client.get(f"{API_URL}/agency")
+        return await client.get(f"{API_URL}/agency", timeout=30.0)
 
 async def get_kpi_data(search_query: str, agencies: List[str]):
+    if not search_query and not agencies:
+        return
     async with httpx.AsyncClient() as client:
         params = [("search", search_query)]
         for a in agencies:
             params.append(("agencies", a))
-        return await client.get(f"{API_URL}/kpi", params=params)
+        return await client.get(f"{API_URL}/kpi", params=params, timeout=30.0)
 
-async def get_chart_data(search_query: str, agencies: List[str]):
+async def get_chart_data(search_query: str, agencies: List[str], report_id: int):
+    if not search_query and not agencies:
+        return
     async with httpx.AsyncClient() as client:
-        params = [("search", search_query)]
+        params = [("search", search_query), ("report_id", str(report_id))]
         for a in agencies:
             params.append(("agencies", a))
-        return await client.get(f"{API_URL}/chart", params=params)
+        return await client.get(f"{API_URL}/chart", params=params, timeout=30.0)
 
-async def get_table_data(search_query: str, skip: int, limit: int, agencies: List[str]):
+async def get_table_data(
+    search_query: str,
+    skip: int,
+    limit: int,
+    agencies: List[str],
+    report_id: int,
+    sort: str = None,
+    sort_dir: str = "desc"
+):
+    if not search_query and not agencies:
+        return
     async with httpx.AsyncClient() as client:
         params = [
             ("search", search_query),
             ("skip", str(skip)),
-            ("limit", str(limit))
+            ("limit", str(limit)),
+            ("report_id", str(report_id))
         ]
         for a in agencies:
             params.append(("agencies", a))
-        return await client.get(f"{API_URL}/table", params=params)
+        if sort and sort != "Default":
+            params.append(("sort", sort))
+            params.append(("sort_dir", sort_dir))
+        return await client.get(f"{API_URL}/table", params=params, timeout=30.0)
 
-# Caching wrappers
+# ---------------------------
+# Caching Wrappers
+# ---------------------------
 @st.cache_data
 def cached_get_agencies():
     resp = asyncio.run(get_agency_list())
@@ -134,31 +154,28 @@ def cached_get_agencies():
 
 @st.cache_data
 def cached_get_kpis(q: str, agencies: List[str]):
-    if not q: return []
     resp = asyncio.run(get_kpi_data(q, agencies))
     if resp and resp.status_code == 200:
         return resp.json()
     return []
 
 @st.cache_data
-def cached_get_chart(q: str, agencies: List[str]):
-    if not q: return {}
-    resp = asyncio.run(get_chart_data(q, agencies))
+def cached_get_chart(q: str, agencies: List[str], report_id: int):
+    resp = asyncio.run(get_chart_data(q, agencies, report_id))
     if resp and resp.status_code == 200:
         return resp.json()
     return {}
 
 @st.cache_data
-def cached_get_table(q: str, skip: int, limit: int, agencies: List[str]):
-    if not q: return {}
-    resp = asyncio.run(get_table_data(q, skip, limit, agencies))
+def cached_get_table(q: str, skip: int, limit: int, agencies: List[str], report_id: int, sort: str = "Default", sort_dir: str = "asc"):
+    resp = asyncio.run(get_table_data(q, skip, limit, agencies, report_id, sort, sort_dir))
     if resp and resp.status_code == 200:
         return resp.json()
     return {}
 
-# Session defaults
-# if "model_downloaded" not in st.session_state:
-#     st.session_state["model_downloaded"] = False
+# ---------------------------
+# Session State Defaults
+# ---------------------------
 if "data_refreshed" not in st.session_state:
     st.session_state["data_refreshed"] = False
 if "search" not in st.session_state:
@@ -169,12 +186,17 @@ if "keyword_query" not in st.session_state:
     st.session_state["keyword_query"] = ""
 if "semantic_query" not in st.session_state:
     st.session_state["semantic_query"] = ""
+if "report_id" not in st.session_state:
+    st.session_state["report_id"] = 1
+if "table_sort" not in st.session_state:
+    st.session_state["table_sort"] = "Default"
+if "table_sort_dir" not in st.session_state:
+    st.session_state["table_sort_dir"] = "asc"
 
+# ---------------------------
 # Callbacks
+# ---------------------------
 def on_refresh_click():
-    # if not st.session_state["model_downloaded"]:
-    #     st.warning("Please download a model first.")
-    #     return
     r = asyncio.run(refresh_api())
     if r and r.status_code == 200:
         st.success("Data refreshed!")
@@ -187,118 +209,151 @@ def on_refresh_click():
 def on_search_submit():
     k = st.session_state["keyword_query"].strip()
     s = st.session_state["semantic_query"].strip()
-    if k:
-        st.session_state["search"] = k
-        st.info(f"Keyword search for {k}")
-    elif s:
-        st.session_state["search"] = s
-        st.info(f"Semantic search for {s}")
-    else:
-        st.session_state["search"] = ""
+    st.session_state["search"] = k if k else s
     st.session_state["table_page"] = 1
 
-# Layout
+def on_report_select():
+    st.session_state["table_page"] = 1
+
+def on_sort_change():
+    st.session_state["table_page"] = 1
+    cached_get_table.clear()
+
+# ---------------------------
+# Sidebar - User Controls
+# ---------------------------
+with st.sidebar:
+    st.title("Controls")
+    st.button("Refresh Data", on_click=on_refresh_click)
+    
+    with st.form("search_form"):
+        tab1, tab2 = st.tabs(["Keyword Search", "Semantic Search"])
+        with tab1:
+            st.text_input("Enter keyword(s)", key="keyword_query")
+        with tab2:
+            st.text_input("Enter semantic query", key="semantic_query", disabled=True)
+        st.form_submit_button("Search", on_click=on_search_submit)
+    
+    # Agency filter
+    agencies_info = cached_get_agencies()
+    agency_list = [a["name"] for a in agencies_info.get("agencies", [])]
+    selected_agencies = st.multiselect("Filter by Agency", agency_list, default=[])
+    st.session_state["selected_agencies"] = selected_agencies
+    
+    # Report selection
+    report_id_label = {1: "Core Document Stats", 2: "Section Change Stats"}
+    st.session_state["report_id"] = st.selectbox(
+        "Select Report",
+        [1, 2],
+        index=0 if st.session_state["report_id"] == 1 else 1,
+        format_func=lambda x: report_id_label[x],
+        on_change=on_report_select
+    )
+    
+    # Sort Options
+    sort_options = ["Default", "agency", "title", "chapter", "part", "section_count", "total_word_count"]
+    st.session_state["table_sort"] = st.selectbox(
+        "Sort by",
+        sort_options,
+        index=sort_options.index(st.session_state.get("table_sort", "Default")),
+        on_change=on_sort_change
+    )
+    st.session_state["table_sort_dir"] = st.radio(
+        "Sort direction",
+        ["desc", "asc"],
+        index=0 if st.session_state.get("table_sort_dir", "desc") == "desc" else 1,
+        on_change=on_sort_change
+    )
+
+# ---------------------------
+# Main Container - Data Displays
+# ---------------------------
 st.title("eCFR Analyzer")
-st.text("Use this tool to search for documents within the US Code of Federal Regulations by keyword.")
 
-col1, col2 = st.columns([3,1])
-
-st.button("Refresh Data", on_click=on_refresh_click)
-
-with st.form("search_form"):
-    tab1, tab2 = st.tabs(["Keyword Search", "Semantic Search"])
-    with tab1:
-        st.text_input("Enter keyword(s)", key="keyword_query", value=st.session_state["keyword_query"])
-    with tab2:
-        st.text_input("Enter semantic query", key="semantic_query", value=st.session_state["semantic_query"], disabled=True)
-    st.form_submit_button("Search", on_click=on_search_submit)
-
-# Agency filter
-agencies_info = cached_get_agencies()
-agency_list = [a["display_name"] for a in agencies_info.get("agencies", [])]
-selected_agencies = st.multiselect("Filter by Agency", agency_list, default=[])
-st.session_state["selected_agencies"] = selected_agencies
-
-# KPIs
+# KPI Metrics
 st.subheader("KPI Metrics")
-kpi_data = cached_get_kpis(st.session_state["search"], selected_agencies)
+kpi_data = cached_get_kpis(st.session_state["search"], st.session_state["selected_agencies"])
 if kpi_data:
     ccols = st.columns(len(kpi_data))
     for i, met in enumerate(kpi_data):
         val = met["value"]
         lab = met["metric"]
-        if lab in ["Section Count", "Word Count"]:
-            ccols[i].metric(lab, f"{int(val):,}")
-        # elif lab == "Change Rate":
-        #     ccols[i].metric(lab, f"{val:.1f}%")
-        # elif lab == "Alignment Score":
-        #     ccols[i].metric(lab, f"{val:.1f}")
-        # else:
-        #     ccols[i].metric(lab, str(val))
+        ccols[i].metric(lab, f"{int(val):,}")
 else:
     st.write("No KPI data returned.")
 
 # Chart
 st.subheader("Chart")
-chart_info = cached_get_chart(st.session_state["search"], selected_agencies)
+chart_info = cached_get_chart(
+    st.session_state["search"],
+    st.session_state["selected_agencies"],
+    st.session_state["report_id"]
+)
 if chart_info:
-    labs = chart_info.get("labels", [])
-    vals = chart_info.get("values", [])
-    if labs and vals and len(labs) == len(vals):
-        cdf = pd.DataFrame({"Agency": labs, "SectionCount": vals})
-        cdf = cdf.sort_values("SectionCount", ascending=False)
-        ch = (
-            alt.Chart(cdf)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X(
-                    "Agency", 
-                    sort=alt.SortField(field="SectionCount", order="ascending"),
-                    axis=alt.Axis(labelAngle=-45, labelPadding=10, labelLimit=300, labelOverlap=False)  # Increased padding for more room
-                ),
-                y="SectionCount"
-            )
-            .properties(width=1000, height=500)  # Increase width for extra space
-        )
-        st.altair_chart(ch, use_container_width=True)
+    # chart_info is expected to have: labels, series1, and series2.
+    df_chart = pd.DataFrame({
+        "Agency": chart_info["labels"],
+        "Bar": chart_info["series1"],
+        "Line": chart_info["series2"]
+    })
+    # Sort the dataframe by the bar metric (series1)
+    sort_col = "Bar"
+    df_chart = df_chart.sort_values(by=sort_col, ascending=False)
+    
+    # Create a bar chart for series1 and a line chart for series2
+    if st.session_state["report_id"] == 1:
+        series_1_title = 'Section Count'
+        series_2_title = 'Word Count'
     else:
-        st.write("No chart data or mismatch in lengths.")
+        series_1_title = 'Section Changes'
+        series_2_title = 'Length Change'
+
+    bar = alt.Chart(df_chart).mark_bar().encode(
+        x=alt.X("Agency:N", axis=alt.Axis(labelAngle=-45)),
+        y=alt.Y("Bar:Q", title=series_1_title)
+    )
+    line = alt.Chart(df_chart).mark_line(point=True, color="red").encode(
+        x="Agency:N",
+        y=alt.Y("Line:Q", title=series_2_title)
+    )
+    
+    # Layer the charts and allow independent y scales
+    layered = alt.layer(bar, line).resolve_scale(y='independent').properties(width=800, height=400)
+    st.altair_chart(layered, use_container_width=True)
 else:
     st.write("No chart data available.")
 
-
 # Table
 st.subheader("Results Table")
-st.text("View rows in this table by selecting the checkbox in the first column. The keyword matched in the search query will be highlighted in yellow.")
+st.text("Select a row in the table using the checkbox in the first column.")
 page_num = st.session_state["table_page"]
 skip = (page_num - 1) * TABLE_PAGE_SIZE
-table_resp = cached_get_table(st.session_state["search"], skip, TABLE_PAGE_SIZE, selected_agencies)
+
+table_resp = cached_get_table(
+    st.session_state["search"],
+    skip,
+    TABLE_PAGE_SIZE,
+    st.session_state["selected_agencies"],
+    st.session_state["report_id"],
+    st.session_state["table_sort"],
+    st.session_state["table_sort_dir"]
+)
 
 if table_resp:
     tot = table_resp.get("total_count", 0)
     rows = table_resp.get("data", [])
     if rows:
         df = pd.DataFrame(rows)
-        # for display
-        df_disp = df.copy()
-        if "section_count" in df_disp.columns:
-            df_disp["section_count"] = df_disp["section_count"].apply(lambda x: f"{x:,}")
-        if "total_word_count" in df_disp.columns:
-            df_disp["total_word_count"] = df_disp["total_word_count"].apply(lambda x: f"{x:,}")
-
-        # Show the table
         event = st.dataframe(
-            df_disp,
+            df,
             use_container_width=True,
             hide_index=False,
             selection_mode="single-row",
             on_select="rerun",
             key="table_sel"
         )
-
         total_pages = ceil(tot / TABLE_PAGE_SIZE) if tot else 1
         render_pagination(total_pages, page_num, "table")
-
         selected_rows = event.selection.rows
         if selected_rows:
             idx = selected_rows[0]
@@ -309,7 +364,6 @@ if table_resp:
             st.write(f"**Chapter:** {chosen['chapter']}")
             st.write(f"**Part:** {chosen['part']}")
             raw_text = chosen["full_text"]
-
             st.markdown("---")
             st.markdown("**Section Chunk (Highlighted):**")
             show_full_text_with_highlights(raw_text, st.session_state["search"])
